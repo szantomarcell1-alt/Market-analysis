@@ -8,6 +8,21 @@ import io
 import urllib.request
 import xml.etree.ElementTree as ET
 import time
+import random
+
+# ==========================================
+# 0. YFINANCE BIZTONSÁGI MÓD (Lassú, radarkikerülő)
+# ==========================================
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0'
+]
+
+def safe_float(val, default=0.0):
+    if val is None or pd.isna(val): return default
+    try: return float(val)
+    except: return default
 
 # ==========================================
 # 1. ALAPBEÁLLÍTÁSOK (Terminál Nézet)
@@ -54,7 +69,6 @@ def get_scan_history():
 # 3. HÍR-TERMINÁL (RSS BÁNYÁSZAT)
 # ==========================================
 def fetch_terminal_news(topic):
-    """Élő hírek letöltése a Google News globális hálózatából"""
     url = f"https://news.google.com/rss/search?q={topic.replace(' ', '+')}&hl=en-US&gl=US&ceid=US:en"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -81,17 +95,22 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
     
     for t in tickers:
         try:
-            hist = yf.Ticker(t).history(period=period, interval=interval)
+            # Véletlenszerű User-Agent a tiltás elkerülésére
+            session = requests.Session()
+            session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
+            stock = yf.Ticker(t, session=session)
+            
+            hist = stock.history(period=period, interval=interval)
             
             if not hist.empty:
                 hist = hist.dropna(subset=['Close'])
                 
             if hist.empty or len(hist) < slow_ema + 1:
-                failed_tickers.append(f"{t} (Nincs elég gyertya)")
+                failed_tickers.append(f"{t} (Kevés gyertya)")
+                time.sleep(1)
                 continue
             
             current_price = hist['Close'].iloc[-1]
-            
             delta = hist['Close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -103,18 +122,12 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
             ema_s = hist['Close'].ewm(span=slow_ema, adjust=False).mean().iloc[-1]
             
             signal = "⚪ SEMLEGES"
-            if rsi < 30 and current_price > ema_s:
-                signal = "🟢 LONG (Pattanás várható)"
-            elif rsi < 30 and current_price < ema_s:
-                signal = "🟢 ERŐS LONG (Extrém túladott)"
-            elif rsi > 70 and current_price < ema_s:
-                signal = "🔴 SHORT (Ellenállásba ütközött)"
-            elif rsi > 70 and current_price > ema_s:
-                signal = "🔴 ERŐS SHORT (Extrém túlvett)"
-            elif ema_f > ema_s:
-                signal = "📈 Enyhe Long Trend"
-            elif ema_f < ema_s:
-                signal = "📉 Enyhe Short Trend"
+            if rsi < 30 and current_price > ema_s: signal = "🟢 LONG (Pattanás várható)"
+            elif rsi < 30 and current_price < ema_s: signal = "🟢 ERŐS LONG (Extrém túladott)"
+            elif rsi > 70 and current_price < ema_s: signal = "🔴 SHORT (Ellenállásba ütközött)"
+            elif rsi > 70 and current_price > ema_s: signal = "🔴 ERŐS SHORT (Extrém túlvett)"
+            elif ema_f > ema_s: signal = "📈 Enyhe Long Trend"
+            elif ema_f < ema_s: signal = "📉 Enyhe Short Trend"
                 
             results.append({
                 "Eszköz": t.upper(),
@@ -123,8 +136,10 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
                 f"Trend (EMA {fast_ema}/{slow_ema})": "Bika 🐂" if ema_f > ema_s else "Medve 🐻",
                 "DAYTRADE SZIGNÁL": signal
             })
-        except Exception:
-            failed_tickers.append(f"{t} (Letöltési hiba)")
+            time.sleep(0.5) # Szünet a kérések között
+        except Exception as e:
+            failed_tickers.append(f"{t} ({str(e)[:20]})")
+            time.sleep(1)
             continue
             
     return pd.DataFrame(results), failed_tickers
@@ -149,27 +164,20 @@ def get_index_tickers(index_name):
             html = requests.get(url, headers=headers).text
             tables = pd.read_html(io.StringIO(html))
             for df in tables:
-                if 'Ticker' in df.columns or 'Ticker symbol' in df.columns:
-                    col = 'Ticker' if 'Ticker' in df.columns else 'Ticker symbol'
-                    tickers = df[col].dropna().astype(str).tolist()
-                    return [t if t.endswith('.DE') else f"{t}.DE" for t in tickers]
+                col = 'Ticker' if 'Ticker' in df.columns else ('Ticker symbol' if 'Ticker symbol' in df.columns else None)
+                if col: return [t if t.endswith('.DE') else f"{t}.DE" for t in df[col].dropna().astype(str).tolist()]
             return []
         elif index_name == "FTSE 100 (Egyesült Királyság)":
             url = 'https://en.wikipedia.org/wiki/FTSE_100_Index'
             html = requests.get(url, headers=headers).text
             tables = pd.read_html(io.StringIO(html))
             for df in tables:
-                if 'Ticker' in df.columns or 'EPIC' in df.columns:
-                    col = 'Ticker' if 'Ticker' in df.columns else 'EPIC'
-                    tickers = df[col].dropna().astype(str).tolist()
-                    return [t.replace('.', '-') + ".L" for t in tickers if t != 'nan']
+                col = 'Ticker' if 'Ticker' in df.columns else ('EPIC' if 'EPIC' in df.columns else None)
+                if col: return [t.replace('.', '-') + ".L" for t in df[col].dropna().astype(str).tolist() if t != 'nan']
             return []
-        elif index_name == "Nikkei 225 (Japán)":
-            return ["7203.T", "6758.T", "8306.T", "6861.T", "9984.T", "8035.T", "7974.T", "9983.T", "7267.T", "6501.T", "8001.T", "8031.T", "8316.T", "4063.T", "6981.T", "4568.T", "8053.T", "8411.T", "6098.T", "4519.T", "6367.T", "6902.T", "7741.T", "8002.T", "8766.T", "9432.T", "7269.T", "9433.T"]
-        elif index_name == "SSE 50 (Kína)":
-            return ["600519.SS", "601398.SS", "601288.SS", "601988.SS", "600036.SS", "601318.SS", "601857.SS", "601088.SS", "600900.SS", "601166.SS", "600028.SS", "601328.SS", "600276.SS", "600030.SS", "603259.SS", "601012.SS", "601816.SS", "601628.SS", "601688.SS", "600887.SS", "600104.SS", "600809.SS", "601138.SS", "601211.SS", "601601.SS"]
     except Exception:
         return []
+    return []
 
 def calculate_rsi(data, window=14):
     if len(data) < window: return 50
@@ -183,95 +191,118 @@ def calculate_rsi(data, window=14):
 def run_quant_scan(index_name, tickers, progress_bar, status_text):
     results = []
     failed_tickers = []
+    
     try:
-        spy_hist = yf.Ticker("SPY").history(period="6mo")
+        # A SPY letöltésénél is védjük magunkat
+        session = requests.Session()
+        session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
+        spy_hist = yf.Ticker("SPY", session=session).history(period="6mo")
         spy_6m_return = (spy_hist['Close'].iloc[-1] - spy_hist['Close'].iloc[0]) / spy_hist['Close'].iloc[0] if len(spy_hist) > 0 else 0.05
     except: spy_6m_return = 0.05
 
     total = len(tickers)
     for i, ticker in enumerate(tickers):
-        status_text.text(f"Adatok letöltése és elemzése: {ticker} ({i+1}/{total})")
+        status_text.text(f"Elemzés ({i+1}/{total}): {ticker} - Ez eltart egy ideig a fundamentális adatok pontos letöltése miatt...")
         progress_bar.progress((i + 1) / total)
         
         try:
-            stock = yf.Ticker(ticker)
+            # 1. KÉSLELTETÉS: 2 másodperc várakozás a kitiltás ellen minden cég előtt
+            time.sleep(2)
             
-            # --- 1. ÁRFOLYAM ADATOK ELLENŐRZÉSE ---
+            # 2. ÚJ SESSION: Minden kérés új böngészőnek tűnjön
+            session = requests.Session()
+            session.headers.update({'User-Agent': random.choice(USER_AGENTS)})
+            stock = yf.Ticker(ticker, session=session)
+            
+            # --- ÁRFOLYAM ADATOK ---
             hist = stock.history(period="6mo")
-            if hist.empty:
-                failed_tickers.append(f"{ticker} (Nincs árfolyamadat)")
+            if hist.empty or 'Close' not in hist.columns:
+                failed_tickers.append(f"{ticker} (Nincs árfolyam)")
                 continue
                 
             hist = hist.dropna(subset=['Close'])
             if len(hist) < 50:
-                failed_tickers.append(f"{ticker} (Kevés kereskedési nap)")
+                failed_tickers.append(f"{ticker} (Kevés adat)")
                 continue
             
-            # --- 2. FUNDAMENTÁLIS ADATOK TISZTÍTÁSA (NoneType védelem) ---
-            info = stock.info
-            name = info.get('shortName', ticker)
-            country = info.get('country', 'Unknown')
             current_price = hist['Close'].iloc[-1]
             ma_50 = hist['Close'].rolling(window=50).mean().iloc[-1]
             rsi = calculate_rsi(hist)
             stock_6m_return = (current_price - hist['Close'].iloc[0]) / hist['Close'].iloc[0]
             
-            ev = float(info.get('enterpriseValue') or 0.0)
-            fcf = float(info.get('freeCashflow') or 0.0)
-            market_cap = float(info.get('marketCap') or 0.0)
+            # --- FUNDAMENTÁLIS ADATOK (Próbáljuk megkérni a Yahoo-t, hogy adja vissza az infot) ---
+            # Védett blokk, ha a Yahoo nem adna adatot, akkor a try-except megfogja
+            info = {}
+            try:
+                 # Itt hívjuk be az adatokat, ez a leginkább blokkolt funkció a Yahoo-n felhőből
+                 info = stock.info
+            except Exception as e:
+                 # Ha nem ad info-t, üres dict marad, és a safe_float 0.0-át fog adni.
+                 pass
             
-            market_cap_billions = market_cap / 1_000_000_000
+            name = info.get('shortName') or ticker
+            country = info.get('country') or 'Unknown'
+            
+            ev = safe_float(info.get('enterpriseValue'))
+            fcf = safe_float(info.get('freeCashflow'))
+            market_cap = safe_float(info.get('marketCap'))
+            market_cap_billions = market_cap / 1_000_000_000 if market_cap > 0 else 0.0
+            
+            # FCF Yield kiszámítása, csak ha az Enterprise Value nagyobb 0-nál
             fcf_yield = (fcf / ev) if ev > 0 else 0.0
             
-            ev_to_sales = float(info.get('enterpriseToRevenue') or 999.0)
-            roe = float(info.get('returnOnEquity') or 0.0)
-            debt_to_equity = float(info.get('debtToEquity') or 999.0)
-            peg = float(info.get('pegRatio') or 999.0)
-            growth = float(info.get('revenueGrowth') or 0.0)
+            ev_to_sales = safe_float(info.get('enterpriseToRevenue'), 999.0)
+            roe = safe_float(info.get('returnOnEquity'))
+            debt_to_equity = safe_float(info.get('debtToEquity'), 999.0)
+            peg = safe_float(info.get('pegRatio'), 999.0)
+            growth = safe_float(info.get('revenueGrowth'))
             
-            # --- 3. PONTOZÓ RENDSZER ---
+            # --- 3. PONTOZÓ RENDSZER (Minden paraméter megvan) ---
             long_score, med_score, short_score = 0, 0, 0
             
-            if ev_to_sales > 15: long_score -= 5 
-            if debt_to_equity > 200: long_score -= 3
+            # Értékeltség büntetés / jutalmazás
+            if ev_to_sales < 15: # Csak akkor vizsgáljuk, ha nem 999.0 (alapérték)
+                if ev_to_sales > 15: long_score -= 5 
+                if 0 < ev_to_sales < 5: long_score += 2
+                
+            # Adósság és Profitabilitás
+            if debt_to_equity != 999.0 and debt_to_equity > 200: long_score -= 3
             if fcf_yield > 0.04: long_score += 3
             if roe > 0.15: long_score += 2 
-            if 0 < ev_to_sales < 5: long_score += 2
             
-            if 0 < peg < 1.2: med_score += 3 
+            # Növekedés és PEG
+            if peg != 999.0 and 0 < peg < 1.2: med_score += 3 
             if growth > 0.10: med_score += 2
             
-            if 0 < market_cap_billions < 20 and growth > 0.15:
-                med_score += 4; long_score += 2
-            elif market_cap_billions > 1000 and growth < 0.10:
-                med_score -= 2
+            # Méret alapú súlyozás
+            if 0 < market_cap_billions < 20 and growth > 0.15: med_score += 4; long_score += 2
+            elif market_cap_billions > 1000 and growth < 0.10: med_score -= 2
                 
+            # Technikai kép
             if stock_6m_return > spy_6m_return: med_score += 2; short_score += 2
             if rsi < 35: short_score += 4 
             if current_price > ma_50 and rsi > 50: short_score += 2 
             
-            MACRO_MATRIX = {
-                'Hungary': 1.3, 'United States': 1.0, 'Germany': 0.8, 'China': 0.7, 'Netherlands': 1.1,
-                'United Kingdom': 0.9 
-            }
-            cm = MACRO_MATRIX.get(country, 1.0)
+            # Országkockázat
+            cm = {'Hungary': 1.3, 'United States': 1.0, 'Germany': 0.8, 'China': 0.7}.get(country, 1.0)
             long_score *= cm; med_score *= cm; short_score *= cm
             
             results.append({
                 'Ticker': ticker, 'Név': name, 'Ország': country, 'Méret_B': market_cap_billions, 'Ár': current_price,
-                'FCF_Yield': f"{fcf_yield*100:.1f}%" if fcf_yield != 0 else "N/A",
+                'FCF_Yield': f"{fcf_yield*100:.1f}%" if fcf_yield != 0.0 else "N/A",
                 'EV_Sales': f"{ev_to_sales:.1f}" if ev_to_sales != 999.0 else "N/A",
-                'ROE': f"{roe*100:.1f}%" if roe != 0 else "N/A",
+                'ROE': f"{roe*100:.1f}%" if roe != 0.0 else "N/A",
                 'Debt_Eq': f"{debt_to_equity:.1f}%" if debt_to_equity != 999.0 else "N/A",
                 'PEG': peg if peg != 999.0 else "N/A",
-                'Növekedés': f"{growth*100:.1f}%" if growth != 0 else "N/A",
+                'Növekedés': f"{growth*100:.1f}%" if growth != 0.0 else "N/A",
                 'RSI': f"{rsi:.1f}",
                 'RS_vs_SPY': "Igen" if stock_6m_return > spy_6m_return else "Nem",
                 'Long_Score': long_score, 'Med_Score': med_score, 'Short_Score': short_score
             })
             
-        except Exception:
-            failed_tickers.append(f"{ticker} (Belső adathiba)")
+        except Exception as e:
+            failed_tickers.append(f"{ticker} ({str(e)[:20]})")
+            time.sleep(2) # Hiba esetén is kell a szünet
             continue
             
     return pd.DataFrame(results), failed_tickers
@@ -330,14 +361,10 @@ with tab1:
                                 ["1 perces (EMA 20/50)", "5 perces (EMA 20/50)", "15 perces (EMA 9/21)", "1 órás (EMA 9/21)"], 
                                 horizontal=True)
                                 
-        if "1 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "1m", 20, 50, "5d"
-        elif "5 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "5m", 20, 50, "5d"
-        elif "15 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "15m", 9, 21, "1mo"
-        else:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "60m", 9, 21, "3mo"
+        if "1 perces" in tf_selection: tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "1m", 20, 50, "5d"
+        elif "5 perces" in tf_selection: tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "5m", 20, 50, "5d"
+        elif "15 perces" in tf_selection: tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "15m", 9, 21, "1mo"
+        else: tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "60m", 9, 21, "3mo"
         
         default_tickers = "GC=F, SPY, QQQ, TSLA, NVDA, AAPL"
         user_tickers = st.text_input("Figyelt Tickerek (Vesszővel elválasztva):", value=default_tickers)
@@ -352,11 +379,10 @@ with tab1:
                         if 'LONG' in s: return 'background-color: #004d00; color: white'
                         if 'SHORT' in s: return 'background-color: #4d0000; color: white'
                         return ''
-                    
                     styled_df = df_daytrade.style.map(highlight_signals, subset=['DAYTRADE SZIGNÁL'])
                     st.dataframe(styled_df, hide_index=True, use_container_width=True)
                 else:
-                    st.error("Nem sikerült letölteni egyetlen ticker adatát sem ezen az idősíkon.")
+                    st.error("Nem sikerült letölteni az adatokat.")
                 
                 if failed_tickers:
                     st.warning(f"⚠️ A következő eszközöket a rendszer kihagyta adathiány/hiba miatt: {', '.join(failed_tickers)}")
@@ -368,20 +394,15 @@ with tab1:
                 primary_ticker = tickers_list[0].replace("=F", "").replace("=X", "")
                 st.markdown(f"#### 🎯 Fókusz: {primary_ticker}")
                 target_news = fetch_terminal_news(f"{primary_ticker} stock financial news")
-                for n in target_news:
-                    st.markdown(f"- [{n['title']}]({n['link']})")
+                for n in target_news: st.markdown(f"- [{n['title']}]({n['link']})")
                 st.divider()
 
             st.markdown("#### 🥇 Arany Piac (Gold)")
-            gold_news = fetch_terminal_news("gold market finance OR gold price")
-            for n in gold_news:
-                st.markdown(f"- [{n['title']}]({n['link']})")
+            for n in fetch_terminal_news("gold market finance OR gold price"): st.markdown(f"- [{n['title']}]({n['link']})")
             st.divider()
             
             st.markdown("#### 🌍 Globális Makro")
-            macro_news = fetch_terminal_news("global stock market OR federal reserve interest rates")
-            for n in macro_news:
-                st.markdown(f"- [{n['title']}]({n['link']})")
+            for n in fetch_terminal_news("global stock market OR federal reserve interest rates"): st.markdown(f"- [{n['title']}]({n['link']})")
 
 # ==========================================
 # TAB 2: A HOSSZÚ TÁVÚ SZKENNER
@@ -392,29 +413,30 @@ with tab2:
     
     col_a, col_b = st.columns([2, 1])
     with col_a:
-        selected_index = st.selectbox("Vizsgálandó piac:", ["S&P 500 (USA)", "DAX (Németország)", "BUX (Magyarország)", "FTSE 100 (Egyesült Királyság)", "Nikkei 225 (Japán)", "SSE 50 (Kína)"])
+        selected_index = st.selectbox("Vizsgálandó piac:", ["S&P 500 (USA)", "DAX (Németország)", "BUX (Magyarország)", "FTSE 100 (Egyesült Királyság)"])
     with col_b:
-        scan_limit = st.slider("Cégek max. száma (Véd a kitiltás ellen):", min_value=10, max_value=500, value=50, step=10)
+        # Meghagytam a csúszkát, de ha akarod, húzd fel maximumra, letölti az egészet, csak lassan!
+        scan_limit = st.slider("Mennyi céget vizsgáljon át? (A fundamentális adatletöltés lassú!)", min_value=5, max_value=500, value=20, step=5)
     
-    if st.button("🚀 Szkennelés Indítása (Hosszú táv)", type="primary"):
+    if st.button("🚀 Szkennelés Indítása", type="primary"):
         tickers_to_scan = get_index_tickers(selected_index)
         if tickers_to_scan:
-            tickers_to_scan = tickers_to_scan[:scan_limit] # LIMITÁLÁS a Rate Limit ellen
+            tickers_to_scan = tickers_to_scan[:scan_limit] 
             prog = st.progress(0)
             status_text = st.empty()
             df_scan, failed_scans = run_quant_scan(selected_index, tickers_to_scan, prog, status_text) 
             
             if not df_scan.empty:
-                status_text.success("✅ Szkennelés kész! Eredmények mentve az adatbázisba.")
+                status_text.success("✅ Szkennelés kész!")
                 save_scan_results(df_scan, selected_index)
                 st.session_state['last_scan'] = df_scan
             else:
-                status_text.error("Kritikus hiba: Egyetlen céget sem sikerült letölteni a Yahoo Finance-ről.")
+                status_text.error("Kritikus hiba: Egyetlen céget sem sikerült letölteni a Yahoo-ról.")
                 
             if failed_scans:
-                st.warning(f"⚠️ A következő cégeket a rendszer kihagyta adathiány miatt: {', '.join(failed_scans)}")
+                st.warning(f"⚠️ {len(failed_scans)} cég kihagyva adathiány miatt. Példák: {', '.join(failed_scans[:5])}")
         else:
-            st.error("Hiba az index komponenseinek letöltésekor.")
+            st.error("Hiba az index komponenseinek letöltésekor. Ellenőrizd a requirements.txt fájlt a GitHubon! Kell bele az 'lxml' sor is.")
 
     if 'last_scan' in st.session_state and not st.session_state['last_scan'].empty:
         st.subheader("💡 Top Eredmények és AI Promptok")
@@ -425,21 +447,18 @@ with tab2:
         short_top = df_show.sort_values(by='Short_Score', ascending=False).head(3)
         
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             st.write("**Hosszú Táv (Top 3)**")
             for _, row in long_top.iterrows():
                 with st.expander(f"🥇 {row['Név']} ({row['Ticker']})"):
                     st.write(f"FCF Hozam: {row['FCF_Yield']} | ROE: {row['ROE']}")
                     st.code(generate_mega_prompt(row, "Hosszú táv (5-10 év)"), language="markdown")
-        
         with col2:
             st.write("**Közép Táv (Top 3)**")
             for _, row in med_top.iterrows():
                 with st.expander(f"🔥 {row['Név']} ({row['Ticker']})"):
                     st.write(f"Növekedés: {row['Növekedés']} | PEG: {row['PEG']}")
                     st.code(generate_mega_prompt(row, "Közép táv (1-5 év)"), language="markdown")
-
         with col3:
             st.write("**Rövid Táv (Top 3)**")
             for _, row in short_top.iterrows():
@@ -453,7 +472,6 @@ with tab2:
 with tab3:
     st.header("🗄️ Történelmi Adatbázis")
     df_history = get_scan_history()
-    
     if not df_history.empty:
         col1, col2 = st.columns(2)
         with col1:
@@ -466,15 +484,7 @@ with tab3:
         if sel_dates and sel_indices:
             filtered_df = df_history[(df_history['scan_date'].isin(sel_dates)) & (df_history['index_name'].isin(sel_indices))]
             st.dataframe(filtered_df, use_container_width=True)
-            
-            st.download_button(
-                label="📥 Adataid letöltése Excelbe (CSV)",
-                data=filtered_df.to_csv(index=False).encode('utf-8'),
-                file_name=f"quant_scan_{datetime.now().strftime('%Y%m%d')}.csv",
-                mime='text/csv'
-            )
-    else:
-        st.info("Még nem futtattál le egyetlen szkennelést sem.")
+            st.download_button(label="📥 Letöltés CSV-be", data=filtered_df.to_csv(index=False).encode('utf-8'), file_name="quant_scan.csv", mime='text/csv')
 
 # ==========================================
 # 8. AUTOMATA FRISSÍTÉS CIKLUS
