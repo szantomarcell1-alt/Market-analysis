@@ -83,11 +83,9 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
         try:
             hist = yf.Ticker(t).history(period=period, interval=interval)
             
-            # Üres (NaN) adatok kiszűrése
             if not hist.empty:
                 hist = hist.dropna(subset=['Close'])
                 
-            # Ha az üres adatok kiszűrése után nem marad elég gyertya a mozgóátlaghoz
             if hist.empty or len(hist) < slow_ema + 1:
                 failed_tickers.append(f"{t} (Nincs elég gyertya)")
                 continue
@@ -132,7 +130,7 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
     return pd.DataFrame(results), failed_tickers
 
 # ==========================================
-# 5. HOSSZÚ TÁVÚ SZKENNER (A TELJES MOTOR)
+# 5. HOSSZÚ TÁVÚ SZKENNER (A BIZTONSÁGOS MOTOR)
 # ==========================================
 @st.cache_data(ttl=86400) 
 def get_index_tickers(index_name):
@@ -170,7 +168,7 @@ def get_index_tickers(index_name):
             return ["7203.T", "6758.T", "8306.T", "6861.T", "9984.T", "8035.T", "7974.T", "9983.T", "7267.T", "6501.T", "8001.T", "8031.T", "8316.T", "4063.T", "6981.T", "4568.T", "8053.T", "8411.T", "6098.T", "4519.T", "6367.T", "6902.T", "7741.T", "8002.T", "8766.T", "9432.T", "7269.T", "9433.T"]
         elif index_name == "SSE 50 (Kína)":
             return ["600519.SS", "601398.SS", "601288.SS", "601988.SS", "600036.SS", "601318.SS", "601857.SS", "601088.SS", "600900.SS", "601166.SS", "600028.SS", "601328.SS", "600276.SS", "600030.SS", "603259.SS", "601012.SS", "601816.SS", "601628.SS", "601688.SS", "600887.SS", "600104.SS", "600809.SS", "601138.SS", "601211.SS", "601601.SS"]
-    except Exception as e:
+    except Exception:
         return []
 
 def calculate_rsi(data, window=14):
@@ -184,6 +182,7 @@ def calculate_rsi(data, window=14):
 
 def run_quant_scan(index_name, tickers, progress_bar, status_text):
     results = []
+    failed_tickers = []
     try:
         spy_hist = yf.Ticker("SPY").history(period="6mo")
         spy_6m_return = (spy_hist['Close'].iloc[-1] - spy_hist['Close'].iloc[0]) / spy_hist['Close'].iloc[0] if len(spy_hist) > 0 else 0.05
@@ -196,10 +195,20 @@ def run_quant_scan(index_name, tickers, progress_bar, status_text):
         
         try:
             stock = yf.Ticker(ticker)
-            info = stock.info
-            hist = stock.history(period="6mo")
-            if hist.empty or len(hist) < 50: continue
             
+            # --- 1. ÁRFOLYAM ADATOK ELLENŐRZÉSE ---
+            hist = stock.history(period="6mo")
+            if hist.empty:
+                failed_tickers.append(f"{ticker} (Nincs árfolyamadat)")
+                continue
+                
+            hist = hist.dropna(subset=['Close'])
+            if len(hist) < 50:
+                failed_tickers.append(f"{ticker} (Kevés kereskedési nap)")
+                continue
+            
+            # --- 2. FUNDAMENTÁLIS ADATOK TISZTÍTÁSA (NoneType védelem) ---
+            info = stock.info
             name = info.get('shortName', ticker)
             country = info.get('country', 'Unknown')
             current_price = hist['Close'].iloc[-1]
@@ -207,32 +216,34 @@ def run_quant_scan(index_name, tickers, progress_bar, status_text):
             rsi = calculate_rsi(hist)
             stock_6m_return = (current_price - hist['Close'].iloc[0]) / hist['Close'].iloc[0]
             
-            ev = info.get('enterpriseValue', 0)
-            fcf = info.get('freeCashflow', 0)
-            market_cap = info.get('marketCap', 0)
-            market_cap_billions = market_cap / 1_000_000_000 if market_cap else 0
+            ev = float(info.get('enterpriseValue') or 0.0)
+            fcf = float(info.get('freeCashflow') or 0.0)
+            market_cap = float(info.get('marketCap') or 0.0)
             
-            fcf_yield = (fcf / ev) if (ev and ev > 0) else 0
-            ev_to_sales = info.get('enterpriseToRevenue', 999)
-            roe = info.get('returnOnEquity', 0)
-            debt_to_equity = info.get('debtToEquity', 999) 
-            peg = info.get('pegRatio', 999)
-            growth = info.get('revenueGrowth', 0)
+            market_cap_billions = market_cap / 1_000_000_000
+            fcf_yield = (fcf / ev) if ev > 0 else 0.0
             
+            ev_to_sales = float(info.get('enterpriseToRevenue') or 999.0)
+            roe = float(info.get('returnOnEquity') or 0.0)
+            debt_to_equity = float(info.get('debtToEquity') or 999.0)
+            peg = float(info.get('pegRatio') or 999.0)
+            growth = float(info.get('revenueGrowth') or 0.0)
+            
+            # --- 3. PONTOZÓ RENDSZER ---
             long_score, med_score, short_score = 0, 0, 0
             
-            if ev_to_sales is not None and ev_to_sales > 15: long_score -= 5 
-            if debt_to_equity is not None and debt_to_equity > 200: long_score -= 3
-            if fcf_yield is not None and fcf_yield > 0.04: long_score += 3
-            if roe is not None and roe > 0.15: long_score += 2 
-            if ev_to_sales is not None and 0 < ev_to_sales < 5: long_score += 2
+            if ev_to_sales > 15: long_score -= 5 
+            if debt_to_equity > 200: long_score -= 3
+            if fcf_yield > 0.04: long_score += 3
+            if roe > 0.15: long_score += 2 
+            if 0 < ev_to_sales < 5: long_score += 2
             
-            if peg is not None and 0 < peg < 1.2: med_score += 3 
-            if growth is not None and growth > 0.10: med_score += 2
+            if 0 < peg < 1.2: med_score += 3 
+            if growth > 0.10: med_score += 2
             
-            if market_cap_billions > 0 and market_cap_billions < 20 and growth is not None and growth > 0.15:
+            if 0 < market_cap_billions < 20 and growth > 0.15:
                 med_score += 4; long_score += 2
-            elif market_cap_billions > 1000 and growth is not None and growth < 0.10:
+            elif market_cap_billions > 1000 and growth < 0.10:
                 med_score -= 2
                 
             if stock_6m_return > spy_6m_return: med_score += 2; short_score += 2
@@ -249,20 +260,21 @@ def run_quant_scan(index_name, tickers, progress_bar, status_text):
             results.append({
                 'Ticker': ticker, 'Név': name, 'Ország': country, 'Méret_B': market_cap_billions, 'Ár': current_price,
                 'FCF_Yield': f"{fcf_yield*100:.1f}%" if fcf_yield != 0 else "N/A",
-                'EV_Sales': f"{ev_to_sales:.1f}" if ev_to_sales != 999 else "N/A",
+                'EV_Sales': f"{ev_to_sales:.1f}" if ev_to_sales != 999.0 else "N/A",
                 'ROE': f"{roe*100:.1f}%" if roe != 0 else "N/A",
-                'Debt_Eq': f"{debt_to_equity:.1f}%" if debt_to_equity != 999 else "N/A",
-                'PEG': peg if peg != 999 else "N/A",
-                'Növekedés': f"{growth*100:.1f}%" if growth is not None else "N/A",
+                'Debt_Eq': f"{debt_to_equity:.1f}%" if debt_to_equity != 999.0 else "N/A",
+                'PEG': peg if peg != 999.0 else "N/A",
+                'Növekedés': f"{growth*100:.1f}%" if growth != 0 else "N/A",
                 'RSI': f"{rsi:.1f}",
                 'RS_vs_SPY': "Igen" if stock_6m_return > spy_6m_return else "Nem",
                 'Long_Score': long_score, 'Med_Score': med_score, 'Short_Score': short_score
             })
             
         except Exception:
+            failed_tickers.append(f"{ticker} (Belső adathiba)")
             continue
             
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), failed_tickers
 
 # ==========================================
 # 6. MEGA-PROMPT GENERÁTOR
@@ -299,7 +311,6 @@ init_db()
 st.title("⚡ Pro Quant Terminal")
 st.markdown("*A te személyes, napon belüli kereskedési és makro-elemző asztalod.*")
 
-# Automata frissítés kapcsoló a Sidebarban
 auto_refresh = st.sidebar.toggle("🔄 Élő Terminál Mód (Auto-frissítés 30mp)", value=False)
 if auto_refresh:
     st.sidebar.success("Az Élő Terminál aktív! Az oldal 30 másodpercenként frissül.")
@@ -315,7 +326,6 @@ with tab1:
     with col1:
         st.subheader("🎯 Napon Belüli Szignálok")
         
-        # IDŐSÍK VÁLASZTÓ (Bugfixált, 5 napos limit az 1 és 5 percesekhez)
         tf_selection = st.radio("Válassz Idősíkot és Stratégiát:", 
                                 ["1 perces (EMA 20/50)", "5 perces (EMA 20/50)", "15 perces (EMA 9/21)", "1 órás (EMA 9/21)"], 
                                 horizontal=True)
@@ -349,7 +359,7 @@ with tab1:
                     st.error("Nem sikerült letölteni egyetlen ticker adatát sem ezen az idősíkon.")
                 
                 if failed_tickers:
-                    st.warning(f"⚠️ A következő eszközöknél nem volt elég kereskedési adat a kért idősíkon, így az algoritmus biztonsági okokból kihagyta őket: {', '.join(failed_tickers)}")
+                    st.warning(f"⚠️ A következő eszközöket a rendszer kihagyta adathiány/hiba miatt: {', '.join(failed_tickers)}")
 
     with col2:
         st.subheader("📰 Hírfolyam")
@@ -379,20 +389,32 @@ with tab1:
 with tab2:
     st.subheader("🔭 Globális Piac Szkenner (Értékalapú)")
     st.write("Makro-kiválasztás és értékeltség alapú hosszú távú kereső.")
-    selected_index = st.selectbox("Vizsgálandó piac:", ["S&P 500 (USA)", "DAX (Németország)", "BUX (Magyarország)", "FTSE 100 (Egyesült Királyság)", "Nikkei 225 (Japán)", "SSE 50 (Kína)"])
+    
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        selected_index = st.selectbox("Vizsgálandó piac:", ["S&P 500 (USA)", "DAX (Németország)", "BUX (Magyarország)", "FTSE 100 (Egyesült Királyság)", "Nikkei 225 (Japán)", "SSE 50 (Kína)"])
+    with col_b:
+        scan_limit = st.slider("Cégek max. száma (Véd a kitiltás ellen):", min_value=10, max_value=500, value=50, step=10)
     
     if st.button("🚀 Szkennelés Indítása (Hosszú táv)", type="primary"):
         tickers_to_scan = get_index_tickers(selected_index)
         if tickers_to_scan:
+            tickers_to_scan = tickers_to_scan[:scan_limit] # LIMITÁLÁS a Rate Limit ellen
             prog = st.progress(0)
             status_text = st.empty()
-            df_scan = run_quant_scan(selected_index, tickers_to_scan, prog, status_text) 
+            df_scan, failed_scans = run_quant_scan(selected_index, tickers_to_scan, prog, status_text) 
+            
             if not df_scan.empty:
                 status_text.success("✅ Szkennelés kész! Eredmények mentve az adatbázisba.")
                 save_scan_results(df_scan, selected_index)
                 st.session_state['last_scan'] = df_scan
             else:
-                status_text.error("Hiba történt a szkennelés során.")
+                status_text.error("Kritikus hiba: Egyetlen céget sem sikerült letölteni a Yahoo Finance-ről.")
+                
+            if failed_scans:
+                st.warning(f"⚠️ A következő cégeket a rendszer kihagyta adathiány miatt: {', '.join(failed_scans)}")
+        else:
+            st.error("Hiba az index komponenseinek letöltésekor.")
 
     if 'last_scan' in st.session_state and not st.session_state['last_scan'].empty:
         st.subheader("💡 Top Eredmények és AI Promptok")
