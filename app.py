@@ -77,10 +77,20 @@ def fetch_terminal_news(topic):
 # ==========================================
 def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
     results = []
+    failed_tickers = []
+    
     for t in tickers:
         try:
             hist = yf.Ticker(t).history(period=period, interval=interval)
-            if hist.empty or len(hist) < slow_ema + 5: continue
+            
+            # Üres (NaN) adatok kiszűrése (A devizák és a Spot Arany miatt létfontosságú!)
+            if not hist.empty:
+                hist = hist.dropna(subset=['Close'])
+                
+            # Ha az üres adatok kiszűrése után nem marad elég gyertya a mozgóátlaghoz
+            if hist.empty or len(hist) < slow_ema + 1:
+                failed_tickers.append(f"{t} (Nincs elég gyertya)")
+                continue
             
             current_price = hist['Close'].iloc[-1]
             
@@ -116,9 +126,10 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
                 "DAYTRADE SZIGNÁL": signal
             })
         except Exception:
+            failed_tickers.append(f"{t} (Letöltési hiba)")
             continue
             
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), failed_tickers
 
 # ==========================================
 # 5. HOSSZÚ TÁVÚ SZKENNER (A TELJES MOTOR)
@@ -304,27 +315,28 @@ with tab1:
     with col1:
         st.subheader("🎯 Napon Belüli Szignálok")
         
-        # IDŐSÍK VÁLASZTÓ
+        # IDŐSÍK VÁLASZTÓ ÉS DINAMIKUS ABLAK TÁGÍTÁS
         tf_selection = st.radio("Válassz Idősíkot és Stratégiát:", 
                                 ["1 perces (EMA 20/50)", "5 perces (EMA 20/50)", "15 perces (EMA 9/21)", "1 órás (EMA 9/21)"], 
                                 horizontal=True)
                                 
         if "1 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "1m", 20, 50, "5d"
+            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "1m", 20, 50, "7d"
         elif "5 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "5m", 20, 50, "5d"
+            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "5m", 20, 50, "1mo"
         elif "15 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "15m", 9, 21, "5d"
+            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "15m", 9, 21, "1mo"
         else:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "60m", 9, 21, "1mo"
+            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "60m", 9, 21, "3mo"
         
-        default_tickers = "GC=F, SPY, QQQ, TSLA, NVDA, AAPL"
+        default_tickers = "XAUUSD=X, SPY, QQQ, TSLA, NVDA, AAPL"
         user_tickers = st.text_input("Figyelt Tickerek (Vesszővel elválasztva):", value=default_tickers)
         tickers_list = [t.strip() for t in user_tickers.split(',') if t.strip()]
         
         if st.button("🔄 Szignálok Frissítése", use_container_width=True) or auto_refresh:
             with st.spinner(f"Élő adatok betöltése ({tf_selection})..."):
-                df_daytrade = run_daytrade_scan(tickers_list, tf_interval, tf_fast_ema, tf_slow_ema, tf_period)
+                df_daytrade, failed_tickers = run_daytrade_scan(tickers_list, tf_interval, tf_fast_ema, tf_slow_ema, tf_period)
+                
                 if not df_daytrade.empty:
                     def highlight_signals(s):
                         if 'LONG' in s: return 'background-color: #004d00; color: white'
@@ -334,13 +346,17 @@ with tab1:
                     styled_df = df_daytrade.style.map(highlight_signals, subset=['DAYTRADE SZIGNÁL'])
                     st.dataframe(styled_df, hide_index=True, use_container_width=True)
                 else:
-                    st.error("Nem sikerült letölteni az adatokat.")
+                    st.error("Nem sikerült letölteni egyetlen ticker adatát sem ezen az idősíkon.")
+                
+                # HIBAJELZŐ RADAR KIJELZÉSE
+                if failed_tickers:
+                    st.warning(f"⚠️ A következő eszközöknél nem volt elég kereskedési adat a kért idősíkon, így az algoritmus biztonsági okokból kihagyta őket: {', '.join(failed_tickers)}")
 
     with col2:
         st.subheader("📰 Hírfolyam")
         if st.button("🔄 Hírek Frissítése", use_container_width=True) or auto_refresh:
             if tickers_list:
-                primary_ticker = tickers_list[0].replace("=F", "")
+                primary_ticker = tickers_list[0].replace("=F", "").replace("=X", "")
                 st.markdown(f"#### 🎯 Fókusz: {primary_ticker}")
                 target_news = fetch_terminal_news(f"{primary_ticker} stock financial news")
                 for n in target_news:
