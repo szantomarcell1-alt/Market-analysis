@@ -83,7 +83,7 @@ def run_daytrade_scan(tickers, interval, fast_ema, slow_ema, period):
         try:
             hist = yf.Ticker(t).history(period=period, interval=interval)
             
-            # Üres (NaN) adatok kiszűrése (A devizák és a Spot Arany miatt létfontosságú!)
+            # Üres (NaN) adatok kiszűrése
             if not hist.empty:
                 hist = hist.dropna(subset=['Close'])
                 
@@ -315,21 +315,21 @@ with tab1:
     with col1:
         st.subheader("🎯 Napon Belüli Szignálok")
         
-        # IDŐSÍK VÁLASZTÓ ÉS DINAMIKUS ABLAK TÁGÍTÁS
+        # IDŐSÍK VÁLASZTÓ (Bugfixált, 5 napos limit az 1 és 5 percesekhez)
         tf_selection = st.radio("Válassz Idősíkot és Stratégiát:", 
                                 ["1 perces (EMA 20/50)", "5 perces (EMA 20/50)", "15 perces (EMA 9/21)", "1 órás (EMA 9/21)"], 
                                 horizontal=True)
                                 
         if "1 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "1m", 20, 50, "7d"
+            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "1m", 20, 50, "5d"
         elif "5 perces" in tf_selection:
-            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "5m", 20, 50, "1mo"
+            tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "5m", 20, 50, "5d"
         elif "15 perces" in tf_selection:
             tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "15m", 9, 21, "1mo"
         else:
             tf_interval, tf_fast_ema, tf_slow_ema, tf_period = "60m", 9, 21, "3mo"
         
-        default_tickers = "XAUUSD=X, SPY, QQQ, TSLA, NVDA, AAPL"
+        default_tickers = "GC=F, SPY, QQQ, TSLA, NVDA, AAPL"
         user_tickers = st.text_input("Figyelt Tickerek (Vesszővel elválasztva):", value=default_tickers)
         tickers_list = [t.strip() for t in user_tickers.split(',') if t.strip()]
         
@@ -348,7 +348,6 @@ with tab1:
                 else:
                     st.error("Nem sikerült letölteni egyetlen ticker adatát sem ezen az idősíkon.")
                 
-                # HIBAJELZŐ RADAR KIJELZÉSE
                 if failed_tickers:
                     st.warning(f"⚠️ A következő eszközöknél nem volt elég kereskedési adat a kért idősíkon, így az algoritmus biztonsági okokból kihagyta őket: {', '.join(failed_tickers)}")
 
